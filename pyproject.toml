@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-ai-video-dubbing-studio"
+version = "0.1.0"
+description = "A local-first foundation for AI-assisted video dubbing."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Local AI Video Dubbing Studio contributors" }]
+dependencies = ["streamlit>=1.36,<2"]
+
+[project.urls]
+Homepage = "https://github.com/your-username/Local-AI-Video-Dubbing-Studio"
+Repository = "https://github.com/your-username/Local-AI-Video-Dubbing-Studio"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
