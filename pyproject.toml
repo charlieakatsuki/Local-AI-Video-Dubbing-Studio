@@ -12,6 +12,12 @@ license = { file = "LICENSE" }
 authors = [{ name = "Local AI Video Dubbing Studio contributors" }]
 dependencies = ["streamlit>=1.36,<2", "faster-whisper>=1.1,<2", "argostranslate>=1.9,<2"]
 
+[project.optional-dependencies]
+tts = [
+    "voxcpm>=2.0,<3; python_version < '3.13'",
+    "soundfile>=0.12,<1; python_version < '3.13'",
+]
+
 [project.urls]
 Homepage = "https://github.com/charlieakatsuki/Local-AI-Video-Dubbing-Studio"
 Repository = "https://github.com/charlieakatsuki/Local-AI-Video-Dubbing-Studio"
