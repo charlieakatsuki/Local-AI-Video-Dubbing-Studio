@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "Local AI Video Dubbing Studio contributors" }]
-dependencies = ["streamlit>=1.36,<2", "faster-whisper>=1.1,<2"]
+dependencies = ["streamlit>=1.36,<2", "faster-whisper>=1.1,<2", "argostranslate>=1.9,<2"]
 
 [project.urls]
 Homepage = "https://github.com/charlieakatsuki/Local-AI-Video-Dubbing-Studio"

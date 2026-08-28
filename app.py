@@ -11,6 +11,9 @@ import streamlit as st
 from local_dubbing.stt.engine import FasterWhisperEngine, cuda_available
 from local_dubbing.stt.formatter import format_srt, format_transcript
 from local_dubbing.stt.models import STTError, STTConfig, SUPPORTED_LANGUAGES, SUPPORTED_MODELS, TranscriptionResult
+from local_dubbing.translation.manager import TranslationManager, format_translated_srt, format_translated_txt
+from local_dubbing.translation.models import SUPPORTED_LANGUAGES as TRANSLATION_LANGUAGES
+from local_dubbing.translation.models import TranslationError, TranslationResult
 
 SUPPORTED_MEDIA_EXTENSIONS = ("mp4", "mov", "mkv", "avi", "mp3", "wav", "m4a")
 
@@ -39,11 +42,25 @@ def _render_results(result: TranscriptionResult) -> None:
         st.caption(f"Language confidence: {result.language_probability:.0%}")
     st.subheader("Transcription segments")
     for segment in result.segments:
-        st.markdown(f"**{segment.start:0.2f}s – {segment.end:0.2f}s**  \\n+{segment.text}")
+        st.markdown(f"**{segment.start:0.2f}s – {segment.end:0.2f}s**  \n{segment.text}")
     st.subheader("Full transcript")
     st.text_area("Transcript", value=result.full_text, height=220, disabled=True, label_visibility="collapsed")
     st.download_button("Download transcript.txt", format_transcript(result), "transcript.txt", "text/plain")
     st.download_button("Download subtitles.srt", format_srt(result.segments), "subtitles.srt", "application/x-subrip")
+
+
+def _render_translation(result: TranslationResult) -> None:
+    """Render translated, timestamp-preserving output stored in this session."""
+    st.success(f"Translation complete with {result.engine_name}.")
+    st.subheader("Translated segments")
+    for segment in result.segments:
+        st.markdown(f"**{segment.start:0.2f}s – {segment.end:0.2f}s**  \n{segment.text}")
+    st.subheader("Translated full transcript")
+    st.text_area("Translated transcript", value=result.full_text, height=220, disabled=True, label_visibility="collapsed")
+    st.download_button("Download translated.txt", format_translated_txt(result), "translated.txt", "text/plain")
+    st.download_button(
+        "Download translated.srt", format_translated_srt(result), "translated.srt", "application/x-subrip"
+    )
 
 
 def main() -> None:
@@ -78,6 +95,7 @@ def main() -> None:
                 media_path = _save_upload_temporarily(uploaded_media, Path(temp_dir))
                 result = FasterWhisperEngine().transcribe(media_path, config, progress_callback=status.write)
             st.session_state["transcription_result"] = result
+            st.session_state.pop("translation_result", None)
             status.update(label="Transcription complete", state="complete")
         except (ValueError, STTError) as error:
             status.update(label="Transcription could not be completed", state="error")
@@ -88,8 +106,54 @@ def main() -> None:
     result = st.session_state.get("transcription_result")
     if isinstance(result, TranscriptionResult):
         _render_results(result)
+        st.divider()
+        st.header("Translation")
+        st.caption("Translate the completed local transcription. Argos language packages are installed separately.")
+        translation_manager = TranslationManager()
+        engine_name = st.selectbox("Translation engine", translation_manager.engine_names)
+        detected_language = result.detected_language if result.detected_language in TRANSLATION_LANGUAGES.values() else "en"
+        language_names = list(TRANSLATION_LANGUAGES)
+        source_index = next(
+            index for index, language_name in enumerate(language_names)
+            if TRANSLATION_LANGUAGES[language_name] == detected_language
+        )
+        source_name = st.selectbox("Translation source language", language_names, index=source_index)
+        target_name = st.selectbox("Target language", language_names, index=1)
+        try:
+            available_pairs = translation_manager.available_language_pairs(engine_name)
+            if available_pairs:
+                pairs_text = ", ".join(
+                    f"{pair.source_language} → {pair.target_language}"
+                    for pair in sorted(available_pairs, key=lambda pair: (pair.source_language, pair.target_language))
+                )
+                st.caption(f"Installed Argos language packages: {pairs_text}")
+            else:
+                st.warning("No Argos language packages are installed. Install a source → target package before translating.")
+        except TranslationError as error:
+            st.warning(str(error))
+        if st.button("Translate", type="primary"):
+            status = st.status("Preparing local translation…", expanded=True)
+            try:
+                translated_result = translation_manager.translate_transcription(
+                    result,
+                    TRANSLATION_LANGUAGES[source_name],
+                    TRANSLATION_LANGUAGES[target_name],
+                    engine_name,
+                    progress_callback=status.write,
+                )
+                st.session_state["translation_result"] = translated_result
+                status.update(label="Translation complete", state="complete")
+            except TranslationError as error:
+                status.update(label="Translation could not be completed", state="error")
+                st.error(str(error))
+            except Exception:
+                status.update(label="Translation could not be completed", state="error")
+                st.error("An unexpected error occurred while translating. Please try again.")
+        translated_result = st.session_state.get("translation_result")
+        if isinstance(translated_result, TranslationResult):
+            _render_translation(translated_result)
     st.divider()
-    st.caption("Translation, voice generation, dubbing, synchronization, and rendering are planned future phases.")
+    st.caption("Voice generation, dubbing, synchronization, and rendering are planned future phases.")
 
 
 if __name__ == "__main__":
