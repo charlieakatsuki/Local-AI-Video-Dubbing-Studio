@@ -8,6 +8,13 @@ from typing import Any
 
 import streamlit as st
 
+from local_dubbing.audio import (
+    AlignmentAction,
+    DefaultTimingAlignmentEngine,
+    TimingAlignmentConfig,
+    TimingAlignmentError,
+    TimingAlignmentResult,
+)
 from local_dubbing.config import AppConfig
 from local_dubbing.stt.engine import FasterWhisperEngine, cuda_available
 from local_dubbing.stt.formatter import format_srt, format_transcript
@@ -96,6 +103,37 @@ def _render_tts(result: TTSResult) -> None:
             st.warning(f"Generated audio is no longer available: {segment.audio_path}")
 
 
+def _render_alignment(result: TimingAlignmentResult) -> None:
+    """Render a non-destructive alignment plan for later audio processing."""
+    st.success(f"Timing plan calculated for {len(result.instructions)} audio segments.")
+    action_labels = {
+        AlignmentAction.KEEP: "Keep unchanged",
+        AlignmentAction.PAD_END: "Pad end with silence",
+        AlignmentAction.SPEED_UP: "Speed up",
+        AlignmentAction.SPEED_UP_AND_TRIM: "Speed up, then trim end",
+    }
+    rows = []
+    for instruction in result.instructions:
+        rows.append(
+            {
+                "Segment": instruction.segment_id,
+                "Timeline": f"{instruction.timeline_start:.2f}s–{instruction.timeline_end:.2f}s",
+                "Generated": f"{instruction.source_duration:.3f}s",
+                "Target": f"{instruction.target_duration:.3f}s",
+                "Difference": f"{instruction.difference_seconds:+.3f}s",
+                "Plan": action_labels[instruction.action],
+                "Speed": f"{instruction.playback_rate:.3f}×",
+                "End padding": f"{instruction.pad_end_seconds:.3f}s",
+                "End trim": f"{instruction.trim_end_seconds:.3f}s",
+            }
+        )
+    st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.caption(
+        "This is a calculation only. Source WAV files are unchanged; silence insertion, speed adjustment, "
+        "trimming, mixing, and FFmpeg rendering are not performed in Phase 8."
+    )
+
+
 def main() -> None:
     """Render the local-first speech-to-text application."""
     st.set_page_config(page_title="Local AI Video Dubbing Studio", page_icon="🎙️", layout="wide")
@@ -130,6 +168,7 @@ def main() -> None:
             st.session_state["transcription_result"] = result
             st.session_state.pop("translation_result", None)
             st.session_state.pop("tts_result", None)
+            st.session_state.pop("timing_alignment_result", None)
             status.update(label="Transcription complete", state="complete")
         except (ValueError, STTError) as error:
             status.update(label="Transcription could not be completed", state="error")
@@ -177,6 +216,7 @@ def main() -> None:
                 )
                 st.session_state["translation_result"] = translated_result
                 st.session_state.pop("tts_result", None)
+                st.session_state.pop("timing_alignment_result", None)
                 status.update(label="Translation complete", state="complete")
             except TranslationError as error:
                 status.update(label="Translation could not be completed", state="error")
@@ -230,6 +270,7 @@ def main() -> None:
                         progress_callback=status.write,
                     )
                     st.session_state["tts_result"] = tts_result
+                    st.session_state.pop("timing_alignment_result", None)
                     status.update(label="Speech generation complete", state="complete")
                 except TTSError as error:
                     status.update(label="Speech generation could not be completed", state="error")
@@ -240,8 +281,38 @@ def main() -> None:
             tts_result = st.session_state.get("tts_result")
             if isinstance(tts_result, TTSResult):
                 _render_tts(tts_result)
+                st.divider()
+                st.header("Timing Alignment")
+                st.caption(
+                    "Calculate how each generated clip should fit its original timestamp slot. "
+                    "This creates instructions only and does not process audio."
+                )
+                alignment_left, alignment_right = st.columns(2)
+                with alignment_left:
+                    tolerance_seconds = st.number_input(
+                        "Duration tolerance (seconds)", min_value=0.0, value=0.05, step=0.01, format="%.2f"
+                    )
+                with alignment_right:
+                    max_speed_up = st.number_input(
+                        "Maximum speed-up", min_value=1.0, value=1.5, step=0.05, format="%.2f"
+                    )
+                if st.button("Calculate timing plan", type="primary"):
+                    try:
+                        alignment_result = DefaultTimingAlignmentEngine().plan(
+                            tts_result.segments,
+                            TimingAlignmentConfig(
+                                tolerance_seconds=float(tolerance_seconds),
+                                max_speed_up=float(max_speed_up),
+                            ),
+                        )
+                        st.session_state["timing_alignment_result"] = alignment_result
+                    except TimingAlignmentError as error:
+                        st.error(str(error))
+                alignment_result = st.session_state.get("timing_alignment_result")
+                if isinstance(alignment_result, TimingAlignmentResult):
+                    _render_alignment(alignment_result)
     st.divider()
-    st.caption("Timing alignment, audio mixing, and final video rendering are planned future phases.")
+    st.caption("Audio processing, mixing, and final video rendering are planned future phases.")
 
 
 if __name__ == "__main__":
