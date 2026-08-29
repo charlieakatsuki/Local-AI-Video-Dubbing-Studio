@@ -10,10 +10,14 @@ import streamlit as st
 
 from local_dubbing.audio import (
     AlignmentAction,
+    AudioMixingConfig,
+    AudioMixingError,
     AudioProcessingError,
     AudioProcessingResult,
     DefaultTimingAlignmentEngine,
+    FFmpegAudioTimelineMixer,
     FFmpegAudioTimingProcessor,
+    MixedAudioResult,
     TimingAlignmentConfig,
     TimingAlignmentError,
     TimingAlignmentResult,
@@ -138,7 +142,7 @@ def _render_alignment(result: TimingAlignmentResult) -> None:
 
 
 def _render_processed_audio(result: AudioProcessingResult) -> None:
-    """Render processed clips that are ready for future timeline placement."""
+    """Render processed clips that are ready for timeline placement."""
     st.success(f"Prepared {len(result.segments)} aligned audio segments with {result.processor_name}.")
     for segment in result.segments:
         action = segment.processing_metadata.get("alignment_action", "unknown")
@@ -152,6 +156,23 @@ def _render_processed_audio(result: AudioProcessingResult) -> None:
             st.caption(str(segment.processed_audio_path))
         else:
             st.warning(f"Processed audio is no longer available: {segment.processed_audio_path}")
+
+
+def _render_mixed_audio(result: MixedAudioResult) -> None:
+    """Render the Phase 10 soundtrack ready for later video attachment."""
+    st.success(
+        f"Mixed {len(result.placements)} segments into a {result.duration:.2f}s soundtrack "
+        f"with {result.mixer_name}."
+    )
+    st.caption(
+        f"{result.sample_rate} Hz · {result.channels} channel(s) · "
+        f"source audio {'included' if result.metadata.get('source_audio_included') else 'not included'}"
+    )
+    if result.output_audio_path.is_file():
+        st.audio(str(result.output_audio_path), format="audio/wav")
+        st.caption(str(result.output_audio_path))
+    else:
+        st.warning(f"Mixed audio is no longer available: {result.output_audio_path}")
 
 
 def main() -> None:
@@ -190,6 +211,7 @@ def main() -> None:
             st.session_state.pop("tts_result", None)
             st.session_state.pop("timing_alignment_result", None)
             st.session_state.pop("audio_processing_result", None)
+            st.session_state.pop("audio_mixing_result", None)
             status.update(label="Transcription complete", state="complete")
         except (ValueError, STTError) as error:
             status.update(label="Transcription could not be completed", state="error")
@@ -239,6 +261,7 @@ def main() -> None:
                 st.session_state.pop("tts_result", None)
                 st.session_state.pop("timing_alignment_result", None)
                 st.session_state.pop("audio_processing_result", None)
+                st.session_state.pop("audio_mixing_result", None)
                 status.update(label="Translation complete", state="complete")
             except TranslationError as error:
                 status.update(label="Translation could not be completed", state="error")
@@ -294,6 +317,7 @@ def main() -> None:
                     st.session_state["tts_result"] = tts_result
                     st.session_state.pop("timing_alignment_result", None)
                     st.session_state.pop("audio_processing_result", None)
+                    st.session_state.pop("audio_mixing_result", None)
                     status.update(label="Speech generation complete", state="complete")
                 except TTSError as error:
                     status.update(label="Speech generation could not be completed", state="error")
@@ -330,6 +354,7 @@ def main() -> None:
                         )
                         st.session_state["timing_alignment_result"] = alignment_result
                         st.session_state.pop("audio_processing_result", None)
+                        st.session_state.pop("audio_mixing_result", None)
                     except TimingAlignmentError as error:
                         st.error(str(error))
                 alignment_result = st.session_state.get("timing_alignment_result")
@@ -350,6 +375,7 @@ def main() -> None:
                                 progress_callback=status.write,
                             )
                             st.session_state["audio_processing_result"] = processing_result
+                            st.session_state.pop("audio_mixing_result", None)
                             status.update(label="Aligned audio preparation complete", state="complete")
                         except AudioProcessingError as error:
                             st.session_state.pop("audio_processing_result", None)
@@ -362,8 +388,85 @@ def main() -> None:
                     processing_result = st.session_state.get("audio_processing_result")
                     if isinstance(processing_result, AudioProcessingResult):
                         _render_processed_audio(processing_result)
+                        st.subheader("Timeline placement and audio mixing")
+                        st.caption(
+                            "Place aligned clips at their original timestamps and create one continuous PCM WAV. "
+                            "Optionally retain the uploaded media's original soundtrack."
+                        )
+                        include_source_audio = st.checkbox(
+                            "Mix with original uploaded audio",
+                            value=False,
+                            disabled=uploaded_media is None,
+                        )
+                        mix_left, mix_right = st.columns(2)
+                        with mix_left:
+                            source_volume = st.slider(
+                                "Original-audio volume",
+                                min_value=0.0,
+                                max_value=1.0,
+                                value=0.35,
+                                step=0.05,
+                                disabled=not include_source_audio,
+                            )
+                            duck_source_audio = st.checkbox(
+                                "Duck original audio while dubbed speech is active",
+                                value=True,
+                                disabled=not include_source_audio,
+                            )
+                        with mix_right:
+                            ducking_ratio = st.slider(
+                                "Ducking ratio",
+                                min_value=1.0,
+                                max_value=20.0,
+                                value=8.0,
+                                step=0.5,
+                                disabled=not include_source_audio or not duck_source_audio,
+                            )
+                            ducking_release = st.number_input(
+                                "Ducking release (milliseconds)",
+                                min_value=10.0,
+                                max_value=9000.0,
+                                value=250.0,
+                                step=10.0,
+                                disabled=not include_source_audio or not duck_source_audio,
+                            )
+                        if st.button("Mix dubbed audio timeline", type="primary"):
+                            status = st.status("Preparing the mixed soundtrack…", expanded=True)
+                            try:
+                                project_config = AppConfig.from_project_root(Path(__file__).resolve().parent)
+                                source_path = None
+                                if include_source_audio:
+                                    source_directory = project_config.outputs_dir / "source_media"
+                                    source_directory.mkdir(parents=True, exist_ok=True)
+                                    source_path = _save_upload_temporarily(uploaded_media, source_directory)
+                                mixing_result = FFmpegAudioTimelineMixer().mix(
+                                    processing_result,
+                                    project_config.outputs_dir / "mixed",
+                                    AudioMixingConfig(
+                                        include_source_audio=include_source_audio,
+                                        source_volume=float(source_volume),
+                                        duck_source_audio=include_source_audio and duck_source_audio,
+                                        ducking_ratio=float(ducking_ratio),
+                                        ducking_release_ms=float(ducking_release),
+                                    ),
+                                    source_audio_path=source_path,
+                                    progress_callback=status.write,
+                                )
+                                st.session_state["audio_mixing_result"] = mixing_result
+                                status.update(label="Audio timeline mixing complete", state="complete")
+                            except (ValueError, AudioMixingError) as error:
+                                st.session_state.pop("audio_mixing_result", None)
+                                status.update(label="Audio timeline could not be mixed", state="error")
+                                st.error(str(error))
+                            except Exception:
+                                st.session_state.pop("audio_mixing_result", None)
+                                status.update(label="Audio timeline could not be mixed", state="error")
+                                st.error("An unexpected error occurred while mixing audio. Please try again.")
+                        mixing_result = st.session_state.get("audio_mixing_result")
+                        if isinstance(mixing_result, MixedAudioResult):
+                            _render_mixed_audio(mixing_result)
     st.divider()
-    st.caption("Final audio mixing and video rendering are planned future phases.")
+    st.caption("Phase 10 creates a complete audio soundtrack. Video attachment/rendering remains Phase 11.")
 
 
 if __name__ == "__main__":

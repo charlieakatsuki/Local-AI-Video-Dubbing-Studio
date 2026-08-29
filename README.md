@@ -59,7 +59,21 @@ Phase 9 materializes a validated Phase 8 plan as new WAV files under `outputs/al
 
 Processing uses local FFmpeg filters. The `atempo` filter changes speech duration while preserving pitch as much as practical; longer rates are split into supported filter stages. Padding and trimming are followed by an exact target-duration boundary to account for sample rounding. Output is uncompressed PCM WAV.
 
-Every processed result retains the segment ID, source and processed paths, original timeline start/end, target language, sample rate, channel count/layout, original TTS metadata, and deterministic processing metadata. FFprobe verifies the source against the plan and confirms output duration and stream properties. These independent files are ready for a later mixer to place at their original timeline starts, but Phase 9 does not mix them or render video.
+Every processed result retains the segment ID, source and processed paths, original timeline start/end, target language, sample rate, channel count/layout, original TTS metadata, and deterministic processing metadata. FFprobe verifies the source against the plan and confirms output duration and stream properties. These independent files are ready for the Phase 10 mixer to place at their original timeline starts.
+
+## Current feature: timeline placement and audio mixing
+
+Phase 10 consumes only the backend-neutral Phase 9 `ProcessedAudioSegment` contract. It places each aligned WAV at its original `timeline_start`, preserves explicit silence before and between clips, and safely sums overlaps in stable Phase 9 input order. A final limiter reduces clipping risk without changing the deterministic placement plan.
+
+The output is one continuous PCM 16-bit WAV under `outputs/mixed/`. Its duration is the last dubbed segment end in dubbed-only mode. When original audio is enabled, the duration is the later of the dubbed timeline end and original-media duration, producing a complete soundtrack ready to attach to video in Phase 11.
+
+Three local modes are supported:
+
+- dubbed speech only;
+- dubbed speech plus original media audio at a configurable volume;
+- dubbed speech plus original audio with sidechain compression that ducks the original while dubbed speech is active.
+
+FFmpeg resamples and remaps inputs to one deterministic output stream, while FFprobe validates the final duration, sample rate, and channel count. Processed segment WAVs and original media are never overwritten. Phase 10 creates audio only; it does not attach the soundtrack to a video or render video frames.
 
 ## Installation on Windows
 
@@ -99,7 +113,9 @@ python -m streamlit run app.py
 8. In **Text-to-Speech**, choose VoxCPM, its model and device, and optionally enter a voice description.
 9. Click **Generate segment audio**. Review each independent WAV clip and its original timestamps.
 10. In **Timing Alignment**, choose a duration tolerance and maximum speed-up, then click **Calculate timing plan** to review the proposed operations.
-11. Click **Process aligned WAV files** to create non-destructive, duration-adjusted PCM WAV copies. Review each prepared clip before a future mixing phase.
+11. Click **Process aligned WAV files** to create non-destructive, duration-adjusted PCM WAV copies.
+12. In **Timeline placement and audio mixing**, choose dubbed-only output or include the uploaded media's original audio. Configure source volume and optional ducking, then click **Mix dubbed audio timeline**.
+13. Review the continuous WAV under `outputs/mixed/`. It is ready for Phase 11 video attachment.
 
 ## Known limitations
 
@@ -110,8 +126,11 @@ python -m streamlit run app.py
 - Translation requires a completed non-empty transcription and different source/target languages.
 - VoxCPM2 is a large 2B-parameter model; generation can be slow or memory-intensive without a compatible GPU.
 - Basic VoxCPM2 voice design is supported, but reference-audio voice cloning is not exposed yet.
-- Phase 9 requires local `ffmpeg` and `ffprobe` executables on PATH.
-- Generated clips are not yet placed or mixed onto a shared timeline, combined with source audio, or rendered into video.
+- Phases 9 and 10 require local `ffmpeg` and `ffprobe` executables on PATH.
+- Phase 10 produces a complete WAV soundtrack but does not attach it to the original video or render video; that remains Phase 11.
+- Overlapping dubbed clips are summed and limited deterministically. Dense overlaps may still sound crowded and can trigger audible limiting.
+- Ducking uses the complete dubbed timeline as a sidechain key. It does not perform stem separation, so it lowers all original audio—including dialogue, music, and effects—during dubbed speech.
+- The mixer currently emits mono or stereo PCM 16-bit WAV and derives its default format from the first processed segment.
 - Severe overruns are trimmed from the end after the configured maximum speed-up; review the Phase 8 plan before processing.
 - FFmpeg `atempo` is pitch-preserving, but aggressive speed changes can still reduce perceived speech quality.
 
@@ -120,8 +139,8 @@ python -m streamlit run app.py
 - `src/local_dubbing/stt/` — modular STT data models, formatter, engine boundary, and faster-whisper adapter.
 - `src/local_dubbing/translation/` — modular models, engine abstraction, Argos adapter, package discovery, and export helpers.
 - `src/local_dubbing/tts/` — structured TTS models, backend manager, engine abstraction, and lazy VoxCPM adapter.
-- `src/local_dubbing/audio/` — backend-neutral timing plans plus non-destructive FFmpeg WAV processing and validation.
-- `app.py` — Streamlit speech-to-text, translation, per-segment TTS, timing-plan, and aligned-audio interface.
+- `src/local_dubbing/audio/` — backend-neutral timing plans, non-destructive WAV processing, and deterministic FFmpeg timeline mixing.
+- `app.py` — Streamlit speech-to-text, translation, TTS, timing, aligned-audio, and soundtrack-mixing interface.
 - `tests/` — fast unit tests that do not download Whisper, Argos, or VoxCPM models.
 
 ## Development
@@ -136,8 +155,8 @@ python -m pytest
 1. Improve local speech-to-text robustness and media inspection.
 2. Add optional offline translation adapters and improved package-management UX.
 3. Extend local TTS with optional voice-cloning controls and additional backends.
-4. Place Phase 9 processed clips at their original timestamps and mix them with source audio in a later phase.
-5. Render a dubbed output video with FFmpeg after timeline mixing is validated.
+4. Improve timeline-mixing controls with optional per-track automation and richer loudness metering.
+5. Attach the validated Phase 10 soundtrack to the original video and render the dubbed output with FFmpeg.
 
 ## License
 

@@ -37,6 +37,26 @@ class AudioProcessingFailedError(AudioProcessingError):
     """Raised when local audio processing cannot produce a valid WAV file."""
 
 
+class AudioMixingError(Exception):
+    """Base exception for safe, user-facing timeline-mixing failures."""
+
+
+class InvalidAudioMixingConfigurationError(AudioMixingError):
+    """Raised when timeline-mixing settings are invalid."""
+
+
+class InvalidAudioMixingInputError(AudioMixingError):
+    """Raised when processed segments or optional source media are invalid."""
+
+
+class MissingAudioMixingDependencyError(AudioMixingError):
+    """Raised when FFmpeg or FFprobe is unavailable for timeline mixing."""
+
+
+class AudioMixingFailedError(AudioMixingError):
+    """Raised when the local mixer cannot produce a valid output timeline."""
+
+
 class AlignmentAction(str, Enum):
     """Backend-neutral operation requested from a future audio processor."""
 
@@ -184,3 +204,90 @@ class AudioProcessingResult:
     def timeline_duration(self) -> float:
         """Return the timeline end needed by a future mixer."""
         return max((segment.timeline_end for segment in self.segments), default=0.0)
+
+
+@dataclass(frozen=True, slots=True)
+class AudioMixingConfig:
+    """Policy for creating a continuous dubbed soundtrack."""
+
+    include_source_audio: bool = False
+    source_volume: float = 1.0
+    duck_source_audio: bool = False
+    ducking_threshold: float = 0.05
+    ducking_ratio: float = 8.0
+    ducking_attack_ms: float = 20.0
+    ducking_release_ms: float = 250.0
+    output_sample_rate: int | None = None
+    output_channels: int | None = None
+
+    def __post_init__(self) -> None:
+        numeric_values = (
+            self.source_volume,
+            self.ducking_threshold,
+            self.ducking_ratio,
+            self.ducking_attack_ms,
+            self.ducking_release_ms,
+        )
+        if not all(isfinite(value) for value in numeric_values):
+            raise InvalidAudioMixingConfigurationError("Audio-mixing values must be finite numbers.")
+        if self.source_volume < 0:
+            raise InvalidAudioMixingConfigurationError("Original-audio volume cannot be negative.")
+        if not 0 < self.ducking_threshold <= 1:
+            raise InvalidAudioMixingConfigurationError("Ducking threshold must be greater than zero and at most 1.0.")
+        if not 1 <= self.ducking_ratio <= 20:
+            raise InvalidAudioMixingConfigurationError("Ducking ratio must be between 1.0 and 20.0.")
+        if not 0.01 <= self.ducking_attack_ms <= 2_000:
+            raise InvalidAudioMixingConfigurationError("Ducking attack must be between 0.01 and 2000 milliseconds.")
+        if not 0.01 <= self.ducking_release_ms <= 9_000:
+            raise InvalidAudioMixingConfigurationError("Ducking release must be between 0.01 and 9000 milliseconds.")
+        if self.output_sample_rate is not None and self.output_sample_rate <= 0:
+            raise InvalidAudioMixingConfigurationError("Output sample rate must be greater than zero.")
+        if self.output_channels is not None and self.output_channels not in {1, 2}:
+            raise InvalidAudioMixingConfigurationError("Output channels must be mono or stereo.")
+        if self.duck_source_audio and not self.include_source_audio:
+            raise InvalidAudioMixingConfigurationError("Source-audio ducking requires original audio to be enabled.")
+
+
+@dataclass(frozen=True, slots=True)
+class TimelinePlacement:
+    """Deterministic placement of one Phase 9 segment on the shared timeline."""
+
+    segment_id: str
+    input_index: int
+    source_order: int
+    audio_path: Path
+    timeline_start: float
+    timeline_end: float
+    duration: float
+    delay_milliseconds: int
+    source_metadata: Mapping[str, Any] = field(default_factory=dict)
+    processing_metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class AudioMixingPlan:
+    """Backend-neutral timeline plan consumed by a local mixer."""
+
+    placements: tuple[TimelinePlacement, ...]
+    timeline_duration: float
+    output_sample_rate: int
+    output_channels: int
+    include_source_audio: bool
+    source_audio_path: Path | None
+    source_audio_duration: float | None
+    config: AudioMixingConfig
+
+
+@dataclass(frozen=True, slots=True)
+class MixedAudioResult:
+    """Continuous mixed soundtrack ready for Phase 11 video attachment."""
+
+    output_audio_path: Path
+    duration: float
+    sample_rate: int
+    channels: int
+    timeline_duration: float
+    placements: tuple[TimelinePlacement, ...]
+    mixer_name: str
+    source_audio_path: Path | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
