@@ -8,12 +8,15 @@ from typing import Any
 
 import streamlit as st
 
+from local_dubbing.config import AppConfig
 from local_dubbing.stt.engine import FasterWhisperEngine, cuda_available
 from local_dubbing.stt.formatter import format_srt, format_transcript
 from local_dubbing.stt.models import STTError, STTConfig, SUPPORTED_LANGUAGES, SUPPORTED_MODELS, TranscriptionResult
 from local_dubbing.translation.manager import TranslationManager, format_translated_srt, format_translated_txt
 from local_dubbing.translation.models import SUPPORTED_LANGUAGES as TRANSLATION_LANGUAGES
 from local_dubbing.translation.models import TranslationError, TranslationResult
+from local_dubbing.tts.manager import TTSManager
+from local_dubbing.tts.models import TTSConfig, TTSError, TTSResult, TTSSegment
 
 SUPPORTED_MEDIA_EXTENSIONS = ("mp4", "mov", "mkv", "avi", "mp3", "wav", "m4a")
 
@@ -63,6 +66,36 @@ def _render_translation(result: TranslationResult) -> None:
     )
 
 
+def _tts_segments(result: TranslationResult) -> tuple[TTSSegment, ...]:
+    """Add stable IDs to translated segments at the TTS boundary."""
+    return tuple(
+        TTSSegment(f"segment-{index:04d}", segment.start, segment.end, segment.text)
+        for index, segment in enumerate(result.segments, start=1)
+        if segment.text.strip()
+    )
+
+
+@st.cache_resource
+def _tts_manager() -> TTSManager:
+    """Keep the lazy engine instance across Streamlit reruns."""
+    return TTSManager()
+
+
+def _render_tts(result: TTSResult) -> None:
+    """Render generated segment audio without aligning or mixing it."""
+    st.success(f"Generated {len(result.segments)} audio segments with {result.engine_name}.")
+    for segment in result.segments:
+        st.markdown(
+            f"**{segment.segment_id} · original {segment.start:0.2f}s–{segment.end:0.2f}s · "
+            f"generated {segment.duration:0.2f}s**"
+        )
+        if segment.audio_path.is_file():
+            st.audio(str(segment.audio_path), format="audio/wav")
+            st.caption(str(segment.audio_path))
+        else:
+            st.warning(f"Generated audio is no longer available: {segment.audio_path}")
+
+
 def main() -> None:
     """Render the local-first speech-to-text application."""
     st.set_page_config(page_title="Local AI Video Dubbing Studio", page_icon="🎙️", layout="wide")
@@ -96,6 +129,7 @@ def main() -> None:
                 result = FasterWhisperEngine().transcribe(media_path, config, progress_callback=status.write)
             st.session_state["transcription_result"] = result
             st.session_state.pop("translation_result", None)
+            st.session_state.pop("tts_result", None)
             status.update(label="Transcription complete", state="complete")
         except (ValueError, STTError) as error:
             status.update(label="Transcription could not be completed", state="error")
@@ -142,6 +176,7 @@ def main() -> None:
                     progress_callback=status.write,
                 )
                 st.session_state["translation_result"] = translated_result
+                st.session_state.pop("tts_result", None)
                 status.update(label="Translation complete", state="complete")
             except TranslationError as error:
                 status.update(label="Translation could not be completed", state="error")
@@ -152,8 +187,61 @@ def main() -> None:
         translated_result = st.session_state.get("translation_result")
         if isinstance(translated_result, TranslationResult):
             _render_translation(translated_result)
+            st.divider()
+            st.header("Text-to-Speech")
+            st.caption(
+                "Generate one local WAV file per translated segment. Phase 7 does not align, mix, or render audio."
+            )
+            manager = _tts_manager()
+            tts_engine_name = st.selectbox("Text-to-speech engine", manager.engine_names)
+            tts_model_name = st.text_input("VoxCPM model", value="openbmb/VoxCPM2")
+            tts_left, tts_right = st.columns(2)
+            with tts_left:
+                tts_device = st.selectbox("TTS device", ["auto", "cpu", "mps", "cuda"])
+                voice_description = st.text_input(
+                    "Voice description (optional)",
+                    help="VoxCPM2 voice-design instruction, for example: A warm, calm narrator.",
+                )
+            with tts_right:
+                inference_timesteps = st.number_input("Inference timesteps", min_value=1, value=10, step=1)
+                seed = st.number_input("Generation seed", min_value=0, value=42, step=1)
+                local_files_only = st.checkbox(
+                    "Use cached/local model files only",
+                    help="Prevents VoxCPM from downloading model files during generation.",
+                )
+            if st.button("Generate segment audio", type="primary"):
+                status = st.status("Preparing local speech generation…", expanded=True)
+                try:
+                    config = TTSConfig(
+                        model_name=tts_model_name,
+                        device=tts_device,
+                        inference_timesteps=int(inference_timesteps),
+                        seed=int(seed),
+                        local_files_only=local_files_only,
+                        voice_description=voice_description or None,
+                    )
+                    project_config = AppConfig.from_project_root(Path(__file__).resolve().parent)
+                    tts_result = manager.synthesize_segments(
+                        _tts_segments(translated_result),
+                        translated_result.target_language,
+                        project_config.outputs_dir / "tts",
+                        tts_engine_name,
+                        config,
+                        progress_callback=status.write,
+                    )
+                    st.session_state["tts_result"] = tts_result
+                    status.update(label="Speech generation complete", state="complete")
+                except TTSError as error:
+                    status.update(label="Speech generation could not be completed", state="error")
+                    st.error(str(error))
+                except Exception:
+                    status.update(label="Speech generation could not be completed", state="error")
+                    st.error("An unexpected error occurred while generating speech. Please try again.")
+            tts_result = st.session_state.get("tts_result")
+            if isinstance(tts_result, TTSResult):
+                _render_tts(tts_result)
     st.divider()
-    st.caption("Voice generation, dubbing, synchronization, and rendering are planned future phases.")
+    st.caption("Timing alignment, audio mixing, and final video rendering are planned future phases.")
 
 
 if __name__ == "__main__":
