@@ -53,6 +53,14 @@ Each instruction retains the segment ID, source WAV path, timeline start/end, ta
 
 Phase 8 performs calculations only. It does not modify WAV files, insert silence, time-stretch speech, trim audio, mix a timeline, or invoke FFmpeg.
 
+## Current feature: aligned audio preparation
+
+Phase 9 materializes a validated Phase 8 plan as new WAV files under `outputs/aligned/`. Original VoxCPM WAV files are never overwritten. Exact-duration clips are copied, short clips are padded with silence, moderate overruns are accelerated, and severe overruns use the Phase 8 speed limit before trimming the remaining excess.
+
+Processing uses local FFmpeg filters. The `atempo` filter changes speech duration while preserving pitch as much as practical; longer rates are split into supported filter stages. Padding and trimming are followed by an exact target-duration boundary to account for sample rounding. Output is uncompressed PCM WAV.
+
+Every processed result retains the segment ID, source and processed paths, original timeline start/end, target language, sample rate, channel count/layout, original TTS metadata, and deterministic processing metadata. FFprobe verifies the source against the plan and confirms output duration and stream properties. These independent files are ready for a later mixer to place at their original timeline starts, but Phase 9 does not mix them or render video.
+
 ## Installation on Windows
 
 Install Python 3.11 or 3.12. FFmpeg must be available on your system PATH so audio can be decoded from video and audio containers. VoxCPM currently requires Python below 3.13 and PyTorch 2.5 or newer; an NVIDIA GPU with CUDA 12 or newer is recommended for practical VoxCPM2 generation, although the adapter also exposes CPU and MPS device choices.
@@ -90,7 +98,8 @@ python -m streamlit run app.py
 7. Review translated segments and download `translated.txt` or `translated.srt`.
 8. In **Text-to-Speech**, choose VoxCPM, its model and device, and optionally enter a voice description.
 9. Click **Generate segment audio**. Review each independent WAV clip and its original timestamps.
-10. In **Timing Alignment**, choose a duration tolerance and maximum speed-up, then click **Calculate timing plan** to review the proposed operations. No audio files are changed.
+10. In **Timing Alignment**, choose a duration tolerance and maximum speed-up, then click **Calculate timing plan** to review the proposed operations.
+11. Click **Process aligned WAV files** to create non-destructive, duration-adjusted PCM WAV copies. Review each prepared clip before a future mixing phase.
 
 ## Known limitations
 
@@ -101,17 +110,18 @@ python -m streamlit run app.py
 - Translation requires a completed non-empty transcription and different source/target languages.
 - VoxCPM2 is a large 2B-parameter model; generation can be slow or memory-intensive without a compatible GPU.
 - Basic VoxCPM2 voice design is supported, but reference-audio voice cloning is not exposed yet.
-- Phase 8 calculates alignment instructions but does not yet apply padding, playback-rate changes, or trimming to WAV files.
-- Generated clips are not mixed onto a shared timeline or rendered into video.
-- Severe overruns may require planned end trimming after the configured speed-up limit; review these instructions before a later processing phase applies them.
+- Phase 9 requires local `ffmpeg` and `ffprobe` executables on PATH.
+- Generated clips are not yet placed or mixed onto a shared timeline, combined with source audio, or rendered into video.
+- Severe overruns are trimmed from the end after the configured maximum speed-up; review the Phase 8 plan before processing.
+- FFmpeg `atempo` is pitch-preserving, but aggressive speed changes can still reduce perceived speech quality.
 
 ## Project layout
 
 - `src/local_dubbing/stt/` — modular STT data models, formatter, engine boundary, and faster-whisper adapter.
 - `src/local_dubbing/translation/` — modular models, engine abstraction, Argos adapter, package discovery, and export helpers.
 - `src/local_dubbing/tts/` — structured TTS models, backend manager, engine abstraction, and lazy VoxCPM adapter.
-- `src/local_dubbing/audio/` — backend-neutral timing policy, validation, and per-segment alignment plans.
-- `app.py` — Streamlit speech-to-text, translation, per-segment TTS, and timing-plan interface.
+- `src/local_dubbing/audio/` — backend-neutral timing plans plus non-destructive FFmpeg WAV processing and validation.
+- `app.py` — Streamlit speech-to-text, translation, per-segment TTS, timing-plan, and aligned-audio interface.
 - `tests/` — fast unit tests that do not download Whisper, Argos, or VoxCPM models.
 
 ## Development
@@ -126,8 +136,8 @@ python -m pytest
 1. Improve local speech-to-text robustness and media inspection.
 2. Add optional offline translation adapters and improved package-management UX.
 3. Extend local TTS with optional voice-cloning controls and additional backends.
-4. Apply the Phase 8 timing plans and mix aligned segment audio onto a local timeline (Phase 9).
-5. Render a dubbed output video with FFmpeg in a later phase.
+4. Place Phase 9 processed clips at their original timestamps and mix them with source audio in a later phase.
+5. Render a dubbed output video with FFmpeg after timeline mixing is validated.
 
 ## License
 

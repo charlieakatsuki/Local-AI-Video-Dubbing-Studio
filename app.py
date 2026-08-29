@@ -10,7 +10,10 @@ import streamlit as st
 
 from local_dubbing.audio import (
     AlignmentAction,
+    AudioProcessingError,
+    AudioProcessingResult,
     DefaultTimingAlignmentEngine,
+    FFmpegAudioTimingProcessor,
     TimingAlignmentConfig,
     TimingAlignmentError,
     TimingAlignmentResult,
@@ -134,6 +137,23 @@ def _render_alignment(result: TimingAlignmentResult) -> None:
     )
 
 
+def _render_processed_audio(result: AudioProcessingResult) -> None:
+    """Render processed clips that are ready for future timeline placement."""
+    st.success(f"Prepared {len(result.segments)} aligned audio segments with {result.processor_name}.")
+    for segment in result.segments:
+        action = segment.processing_metadata.get("alignment_action", "unknown")
+        st.markdown(
+            f"**{segment.segment_id} · timeline {segment.timeline_start:.2f}s–{segment.timeline_end:.2f}s · "
+            f"processed {segment.duration:.2f}s · {segment.sample_rate} Hz · "
+            f"{segment.channels} channel(s) · {action}**"
+        )
+        if segment.processed_audio_path.is_file():
+            st.audio(str(segment.processed_audio_path), format="audio/wav")
+            st.caption(str(segment.processed_audio_path))
+        else:
+            st.warning(f"Processed audio is no longer available: {segment.processed_audio_path}")
+
+
 def main() -> None:
     """Render the local-first speech-to-text application."""
     st.set_page_config(page_title="Local AI Video Dubbing Studio", page_icon="🎙️", layout="wide")
@@ -169,6 +189,7 @@ def main() -> None:
             st.session_state.pop("translation_result", None)
             st.session_state.pop("tts_result", None)
             st.session_state.pop("timing_alignment_result", None)
+            st.session_state.pop("audio_processing_result", None)
             status.update(label="Transcription complete", state="complete")
         except (ValueError, STTError) as error:
             status.update(label="Transcription could not be completed", state="error")
@@ -217,6 +238,7 @@ def main() -> None:
                 st.session_state["translation_result"] = translated_result
                 st.session_state.pop("tts_result", None)
                 st.session_state.pop("timing_alignment_result", None)
+                st.session_state.pop("audio_processing_result", None)
                 status.update(label="Translation complete", state="complete")
             except TranslationError as error:
                 status.update(label="Translation could not be completed", state="error")
@@ -271,6 +293,7 @@ def main() -> None:
                     )
                     st.session_state["tts_result"] = tts_result
                     st.session_state.pop("timing_alignment_result", None)
+                    st.session_state.pop("audio_processing_result", None)
                     status.update(label="Speech generation complete", state="complete")
                 except TTSError as error:
                     status.update(label="Speech generation could not be completed", state="error")
@@ -306,13 +329,41 @@ def main() -> None:
                             ),
                         )
                         st.session_state["timing_alignment_result"] = alignment_result
+                        st.session_state.pop("audio_processing_result", None)
                     except TimingAlignmentError as error:
                         st.error(str(error))
                 alignment_result = st.session_state.get("timing_alignment_result")
                 if isinstance(alignment_result, TimingAlignmentResult):
                     _render_alignment(alignment_result)
+                    st.subheader("Prepare aligned WAV files")
+                    st.caption(
+                        "Create new local WAV files from this plan. FFmpeg preserves pitch during speed changes; "
+                        "the original VoxCPM files remain unchanged."
+                    )
+                    if st.button("Process aligned WAV files", type="primary"):
+                        status = st.status("Preparing aligned audio…", expanded=True)
+                        try:
+                            project_config = AppConfig.from_project_root(Path(__file__).resolve().parent)
+                            processing_result = FFmpegAudioTimingProcessor().process(
+                                alignment_result,
+                                project_config.outputs_dir / "aligned",
+                                progress_callback=status.write,
+                            )
+                            st.session_state["audio_processing_result"] = processing_result
+                            status.update(label="Aligned audio preparation complete", state="complete")
+                        except AudioProcessingError as error:
+                            st.session_state.pop("audio_processing_result", None)
+                            status.update(label="Aligned audio could not be prepared", state="error")
+                            st.error(str(error))
+                        except Exception:
+                            st.session_state.pop("audio_processing_result", None)
+                            status.update(label="Aligned audio could not be prepared", state="error")
+                            st.error("An unexpected error occurred while processing audio. Please try again.")
+                    processing_result = st.session_state.get("audio_processing_result")
+                    if isinstance(processing_result, AudioProcessingResult):
+                        _render_processed_audio(processing_result)
     st.divider()
-    st.caption("Audio processing, mixing, and final video rendering are planned future phases.")
+    st.caption("Final audio mixing and video rendering are planned future phases.")
 
 
 if __name__ == "__main__":
