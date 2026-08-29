@@ -38,7 +38,20 @@ After translation, the **Text-to-Speech** section sends structured translated se
 
 [VoxCPM2](https://github.com/OpenBMB/VoxCPM) is the first backend. It is lazy-loaded: importing this project, opening the app, and running unit tests do not initialize VoxCPM or download weights. The model is loaded only after **Generate segment audio** is clicked. Generated WAV files are written to the ignored `outputs/tts/` directory; model assets remain in the external Hugging Face cache unless a local model path or cache is configured.
 
-This phase deliberately produces independent, unsynchronized WAV files. It does not stretch clips to timestamps, mix audio, or render video.
+VoxCPM deliberately produces independent WAV files. The timing layer described below analyzes them separately, so speech generation remains backend-neutral and unchanged.
+
+## Current feature: timing alignment planning
+
+After TTS generation, the **Timing Alignment** section compares each measured WAV duration with the duration of its original timestamp slot (`end - start`). Phase 8 creates a structured, non-destructive processing plan:
+
+- clips within the configured tolerance are kept unchanged;
+- shorter clips retain their natural speech rate and receive planned silence padding at the end;
+- moderately longer clips receive the exact playback-rate increase needed to fit;
+- severe overruns use a configurable maximum speed-up and then trim only the remaining excess from the end.
+
+Each instruction retains the segment ID, source WAV path, timeline start/end, target language, and TTS metadata. It also reports the target duration, signed duration difference, playback rate, end padding, end trim, and expected duration. This contract is independent of VoxCPM and is designed for a later audio-processing and mixing backend.
+
+Phase 8 performs calculations only. It does not modify WAV files, insert silence, time-stretch speech, trim audio, mix a timeline, or invoke FFmpeg.
 
 ## Installation on Windows
 
@@ -77,6 +90,7 @@ python -m streamlit run app.py
 7. Review translated segments and download `translated.txt` or `translated.srt`.
 8. In **Text-to-Speech**, choose VoxCPM, its model and device, and optionally enter a voice description.
 9. Click **Generate segment audio**. Review each independent WAV clip and its original timestamps.
+10. In **Timing Alignment**, choose a duration tolerance and maximum speed-up, then click **Calculate timing plan** to review the proposed operations. No audio files are changed.
 
 ## Known limitations
 
@@ -87,14 +101,17 @@ python -m streamlit run app.py
 - Translation requires a completed non-empty transcription and different source/target languages.
 - VoxCPM2 is a large 2B-parameter model; generation can be slow or memory-intensive without a compatible GPU.
 - Basic VoxCPM2 voice design is supported, but reference-audio voice cloning is not exposed yet.
-- Generated clips retain original timestamps as metadata but are not duration-aligned, mixed, or rendered into video.
+- Phase 8 calculates alignment instructions but does not yet apply padding, playback-rate changes, or trimming to WAV files.
+- Generated clips are not mixed onto a shared timeline or rendered into video.
+- Severe overruns may require planned end trimming after the configured speed-up limit; review these instructions before a later processing phase applies them.
 
 ## Project layout
 
 - `src/local_dubbing/stt/` — modular STT data models, formatter, engine boundary, and faster-whisper adapter.
 - `src/local_dubbing/translation/` — modular models, engine abstraction, Argos adapter, package discovery, and export helpers.
 - `src/local_dubbing/tts/` — structured TTS models, backend manager, engine abstraction, and lazy VoxCPM adapter.
-- `app.py` — Streamlit speech-to-text, translation, and per-segment TTS interface.
+- `src/local_dubbing/audio/` — backend-neutral timing policy, validation, and per-segment alignment plans.
+- `app.py` — Streamlit speech-to-text, translation, per-segment TTS, and timing-plan interface.
 - `tests/` — fast unit tests that do not download Whisper, Argos, or VoxCPM models.
 
 ## Development
@@ -109,7 +126,7 @@ python -m pytest
 1. Improve local speech-to-text robustness and media inspection.
 2. Add optional offline translation adapters and improved package-management UX.
 3. Extend local TTS with optional voice-cloning controls and additional backends.
-4. Add timing alignment and local audio mixing (Phase 8).
+4. Apply the Phase 8 timing plans and mix aligned segment audio onto a local timeline (Phase 9).
 5. Render a dubbed output video with FFmpeg in a later phase.
 
 ## License
