@@ -30,8 +30,17 @@ class FakeWaveform:
 class FakeVoxCPM:
     tts_model = SimpleNamespace(sample_rate=24_000)
 
-    def generate(self, **kwargs):
-        assert kwargs["text"]
+    def __init__(self) -> None:
+        self.generate_calls = []
+
+    def generate(self, *, text, cfg_value, inference_timesteps):
+        self.generate_calls.append(
+            {
+                "text": text,
+                "cfg_value": cfg_value,
+                "inference_timesteps": inference_timesteps,
+            }
+        )
         return FakeWaveform()
 
 
@@ -106,12 +115,13 @@ def test_engine_selection() -> None:
 
 def test_structured_voxcpm_output_preserves_ids_and_timestamps(tmp_path: Path) -> None:
     written = []
+    fake_model = FakeVoxCPM()
     engine = VoxCPMEngine(
-        model_factory=lambda config: FakeVoxCPM(),
+        model_factory=lambda config: fake_model,
         audio_writer=lambda path, waveform, sample_rate: written.append((path, sample_rate)),
     )
     result = TTSManager((engine,)).synthesize_segments(
-        _segments(), "id", tmp_path, engine.name, TTSConfig(),
+        _segments(), "id", tmp_path, engine.name, TTSConfig(seed=123),
     )
     assert [(item.segment_id, item.start, item.end, item.duration) for item in result.segments] == [
         ("line-1", 1.25, 2.5, 1.0),
@@ -119,7 +129,13 @@ def test_structured_voxcpm_output_preserves_ids_and_timestamps(tmp_path: Path) -
     ]
     assert all(item.target_language == "id" for item in result.segments)
     assert all(item.metadata["sample_rate"] == 24_000 for item in result.segments)
+    assert all(item.metadata["seed_requested"] == 123 for item in result.segments)
+    assert all(item.metadata["seed_applied"] is False for item in result.segments)
     assert [sample_rate for _, sample_rate in written] == [24_000, 24_000]
+    assert fake_model.generate_calls == [
+        {"text": "Halo", "cfg_value": 2.0, "inference_timesteps": 10},
+        {"text": "dunia", "cfg_value": 2.0, "inference_timesteps": 10},
+    ]
 
 
 def test_missing_voxcpm_dependency_is_user_facing(monkeypatch, tmp_path: Path) -> None:
