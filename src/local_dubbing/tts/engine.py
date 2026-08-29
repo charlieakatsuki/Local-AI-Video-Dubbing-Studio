@@ -142,7 +142,6 @@ class VoxCPMEngine(TextToSpeechEngine):
                     text=spoken_text,
                     cfg_value=config.cfg_value,
                     inference_timesteps=config.inference_timesteps,
-                    seed=config.seed,
                 )
                 sample_count = len(waveform)
                 audio_path = output_dir / self._filename(index, segment.segment_id)
@@ -167,7 +166,8 @@ class VoxCPMEngine(TextToSpeechEngine):
                         "device": config.device,
                         "cfg_value": config.cfg_value,
                         "inference_timesteps": config.inference_timesteps,
-                        "seed": config.seed,
+                        "seed_requested": config.seed,
+                        "seed_applied": False,
                     },
                 )
             )
