@@ -21,6 +21,22 @@ class InvalidAlignmentSegmentError(TimingAlignmentError):
     """Raised when generated audio cannot be planned safely."""
 
 
+class AudioProcessingError(Exception):
+    """Base exception for safe, user-facing audio-processing failures."""
+
+
+class InvalidAudioProcessingInputError(AudioProcessingError):
+    """Raised when an alignment plan or source WAV cannot be processed safely."""
+
+
+class MissingAudioProcessingDependencyError(AudioProcessingError):
+    """Raised when the local FFmpeg tools are unavailable."""
+
+
+class AudioProcessingFailedError(AudioProcessingError):
+    """Raised when local audio processing cannot produce a valid WAV file."""
+
+
 class AlignmentAction(str, Enum):
     """Backend-neutral operation requested from a future audio processor."""
 
@@ -107,3 +123,64 @@ class TimingAlignmentResult:
     def timeline_duration(self) -> float:
         """Return the end time of the last planned segment."""
         return max((instruction.timeline_end for instruction in self.instructions), default=0.0)
+
+
+@dataclass(frozen=True, slots=True)
+class AudioStreamInfo:
+    """Measured properties of one local audio stream."""
+
+    duration: float
+    sample_rate: int
+    channels: int
+    channel_layout: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isfinite(self.duration) or self.duration <= 0:
+            raise InvalidAudioProcessingInputError("Audio duration must be a finite value greater than zero.")
+        if self.sample_rate <= 0:
+            raise InvalidAudioProcessingInputError("Audio sample rate must be greater than zero.")
+        if self.channels <= 0:
+            raise InvalidAudioProcessingInputError("Audio channel count must be greater than zero.")
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessedAudioSegment:
+    """A non-destructive aligned WAV ready for later timeline placement."""
+
+    segment_id: str
+    source_audio_path: Path
+    processed_audio_path: Path
+    duration: float
+    timeline_start: float
+    timeline_end: float
+    target_language: str
+    sample_rate: int
+    channels: int
+    channel_layout: str | None = None
+    source_metadata: Mapping[str, Any] = field(default_factory=dict)
+    processing_metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not str(self.segment_id).strip():
+            raise InvalidAudioProcessingInputError("Processed audio requires a segment ID.")
+        if not all(isfinite(value) for value in (self.duration, self.timeline_start, self.timeline_end)):
+            raise InvalidAudioProcessingInputError("Processed audio timing values must be finite.")
+        if self.duration <= 0:
+            raise InvalidAudioProcessingInputError("Processed audio duration must be greater than zero.")
+        if self.timeline_start < 0 or self.timeline_end <= self.timeline_start:
+            raise InvalidAudioProcessingInputError("Processed audio timestamps must define a positive slot.")
+        if self.sample_rate <= 0 or self.channels <= 0:
+            raise InvalidAudioProcessingInputError("Processed audio must retain valid stream information.")
+
+
+@dataclass(frozen=True, slots=True)
+class AudioProcessingResult:
+    """Processed clips prepared for a future timeline mixer."""
+
+    segments: tuple[ProcessedAudioSegment, ...]
+    processor_name: str
+
+    @property
+    def timeline_duration(self) -> float:
+        """Return the timeline end needed by a future mixer."""
+        return max((segment.timeline_end for segment in self.segments), default=0.0)
